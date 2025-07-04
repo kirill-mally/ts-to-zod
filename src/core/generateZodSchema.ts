@@ -1,7 +1,11 @@
 import { camel, lower } from "case";
 import uniq from "lodash/uniq";
-import * as ts from "typescript";
-import { CustomJSDocFormatTypes, DefaultMaybeConfig, MaybeConfig } from "../config";
+import ts, { factory as f } from "typescript";
+import {
+  CustomJSDocFormatTypes,
+  DefaultMaybeConfig,
+  MaybeConfig,
+} from "../config";
 import { findNode } from "../utils/findNode";
 import { isNotNull } from "../utils/isNotNull";
 import { generateCombinations } from "../utils/generateCombinations";
@@ -982,11 +986,8 @@ function buildZodPrimitiveInternal({
       dependencies,
       getDependencyName,
       skipParseJSDoc,
-<<<<<<< HEAD
       customJSDocFormatTypes,
-=======
       maybeConfig,
->>>>>>> pr-91
     });
 
     const zodCall = rest.reduce(
@@ -1007,11 +1008,8 @@ function buildZodPrimitiveInternal({
               dependencies,
               getDependencyName,
               skipParseJSDoc,
-<<<<<<< HEAD
               customJSDocFormatTypes,
-=======
               maybeConfig,
->>>>>>> pr-91
             }),
           ]
         ),
@@ -1077,25 +1075,16 @@ function buildZodPrimitiveInternal({
   }
 
   if (ts.isIndexedAccessTypeNode(typeNode)) {
-<<<<<<< HEAD
     return withZodProperties(
       buildSchemaReference({
         node: typeNode,
         getDependencyName,
         sourceFile,
         dependencies,
+        maybeConfig
       }),
       zodProperties
     );
-=======
-    return buildSchemaReference({
-      node: typeNode,
-      getDependencyName,
-      sourceFile,
-      dependencies,
-      maybeConfig,
-    });
->>>>>>> pr-91
   }
 
   switch (typeNode.kind) {

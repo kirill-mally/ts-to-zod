@@ -8,7 +8,12 @@ import prettier from "prettier";
 import slash from "slash";
 import ts from "typescript";
 import { generate, GenerateProps } from "./core/generate";
-import { TsToZodConfig, Config, MaybeConfig, InputOutputMapping } from "./config";
+import {
+  TsToZodConfig,
+  Config,
+  MaybeConfig,
+  InputOutputMapping,
+} from "./config";
 import {
   getSchemaNameSchema,
   nameFilterSchema,
@@ -84,6 +89,11 @@ class TsToZod extends Command {
     keepComments: Flags.boolean({
       char: "k",
       description: "Keep parameters comments",
+    }),
+    maxRun: Flags.integer({
+      hidden: true,
+      default: 10,
+      description: "max iteration number to resolve the declaration order",
     }),
     maybeOptional: Flags.boolean({
       description:
@@ -283,12 +293,15 @@ See more help with --help`,
 
     const sourceText = await readFile(inputPath, "utf-8");
 
-    const generateOptions: GenerateProps = {
+    const generateOptions: GenerateProps = this.extractGenerateOptions(
       sourceText,
-      inputOutputMappings: relativeIOMappings,
-      ...fileConfig,
+      fileConfig,
       Flags
-    };
+    );
+
+    if (relativeIOMappings != null) {
+      generateOptions.inputOutputMappings = relativeIOMappings;
+    }
     if (typeof Flags.keepComments === "boolean") {
       generateOptions.keepComments = Flags.keepComments;
     }
@@ -451,7 +464,7 @@ See more help with --help`,
   private extractGenerateOptions(
     sourceText: string,
     givenFileConfig: Config | undefined,
-    flags: OutputFlags<typeof TsToZod.flags>
+    flags: Interfaces.InferredFlags<typeof TsToZod.flags>
   ) {
     const { maybeOptional, maybeNullable, maybeTypeNames, ...fileConfig } =
       givenFileConfig || {};
