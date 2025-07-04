@@ -107,6 +107,11 @@ export interface GenerateProps {
    * ```
    */
   maybeConfig?: MaybeConfig;
+
+  /*
+   * Indicates max iteration number to resolve the declaration order.
+   */
+  maxRun?: number;
 }
 
 type ValidTSNode =
