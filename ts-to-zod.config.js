@@ -20,6 +20,7 @@ module.exports = [
     name: "example/person",
     input: "example/person.ts",
     output: "example/person.zod.ts",
+    maybeTypeNames: ["Maybe"],
   },
   { name: "config", input: "src/config.ts", output: "src/config.zod.ts" },
 ];

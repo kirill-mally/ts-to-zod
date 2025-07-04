@@ -25,6 +25,7 @@ export type SupermanName = Superman["name"];
 export type SupermanInvinciblePower = Superman["powers"][2];
 
 export type PersonTuple = [Person, ...Person[]];
+export type Maybe<T> = T | null | undefined;
 
 export interface Superman {
   person: Person;
@@ -33,6 +34,7 @@ export interface Superman {
   age: number;
   underKryptonite?: boolean;
   powers: ["fly", "laser", "invincible"];
+  counters?: Maybe<EnemyPower[]>;
 }
 
 export interface Villain {
