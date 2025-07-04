@@ -9,6 +9,10 @@ import {
 
 import { personSchema } from "./person.zod";
 
+export const maybe = <T extends z.ZodTypeAny>(schema: T) => {
+  return schema.nullable().optional();
+};
+
 export const enemyPowerSchema = z.nativeEnum(EnemyPower);
 
 export const skillsSpeedEnemySchema = z.object({
@@ -41,6 +45,7 @@ export const supermanSchema = z.object({
     z.literal("laser"),
     z.literal("invincible"),
   ]),
+  counters: maybe(z.array(enemyPowerSchema)).optional(),
 });
 
 export const supermanNameSchema = supermanSchema.shape.name;

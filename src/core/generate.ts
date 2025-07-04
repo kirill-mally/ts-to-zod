@@ -6,6 +6,8 @@ import {
   JSDocTagFilter,
   NameFilter,
   CustomJSDocFormatTypes,
+  MaybeConfig,
+  DefaultMaybeConfig
 } from "../config";
 import { getSimplifiedJsDocTags } from "../utils/getSimplifiedJsDocTags";
 import { resolveModules } from "../utils/resolveModules";
@@ -72,6 +74,7 @@ export interface GenerateProps {
    * Path of z.infer<> types file.
    */
   inferredTypes?: string;
+
   /**
    * Custom JSDoc format types.
    */
@@ -82,7 +85,34 @@ export interface GenerateProps {
    * be used to automatically handle imports
    */
   inputOutputMappings?: InputOutputMapping[];
+
+  /*
+   * If present, it will be used to support the `Maybe<T>` special case.
+   *
+   * e.g.
+   * ```ts
+   * // with maybe config: { typeNames: ["Maybe"], optional: true, nullable: true }
+   *
+   * export type X = { a: string; b: Maybe<string> };
+   *
+   * // output:
+   * const maybe = <T extends z.ZodTypeAny>(schema: T) => {
+   *   return schema.optional().nullable();
+   * };
+   *
+   * export const xSchema = zod.object({
+   *   a: zod.string(),
+   *   b: maybe(zod.string())
+   * })
+   * ```
+   */
+  maybeConfig?: MaybeConfig;
 }
+
+type ValidTSNode =
+  | ts.InterfaceDeclaration
+  | ts.TypeAliasDeclaration
+  | ts.EnumDeclaration;
 
 /**
  * Generate zod schemas and integration tests from a typescript file.
@@ -91,6 +121,8 @@ export interface GenerateProps {
  */
 export function generate({
   sourceText,
+  maybeConfig = DefaultMaybeConfig,
+  maxRun = 10,
   nameFilter = () => true,
   jsDocTagFilter = () => true,
   getSchemaName = DEFAULT_GET_SCHEMA,
@@ -102,8 +134,11 @@ export function generate({
   // Create a source file and deal with modules
   const sourceFile = resolveModules(sourceText);
 
-  // Extract the nodes (interface declarations & type aliases)
-  const nodes: Array<TypeNode> = [];
+  const isMaybe = (node: ValidTSNode) =>
+    maybeConfig.typeNames.has(node.name.text);
+
+  // Extract the nodes (interface declarations, type aliases, and enums)
+  const nodes: Array<ValidTSNode> = [];
 
   // declare a map to store the interface name and its corresponding zod schema
   const typeNameMapping = new Map<string, TypeNode | ts.ImportDeclaration>();
@@ -111,6 +146,7 @@ export function generate({
   /**
    * Following const are keeping track of all the things import-related
    */
+
   // All import nodes in the source file
   const zodImportNodes: ts.ImportDeclaration[] = [];
 
@@ -186,6 +222,9 @@ export function generate({
       typeNames.forEach((typeRef) => {
         candidateTypesToBeExtracted.add(typeRef);
       });
+
+      if (isMaybe(node)) return;
+      nodes.push(node);
     }
   };
   ts.forEachChild(sourceFile, visitor);
@@ -265,6 +304,7 @@ export function generate({
       getDependencyName: getDependencyName,
       skipParseJSDoc,
       customJSDocFormatTypes,
+      maybeConfig,
     });
 
     return { typeName, varName, ...zodSchema };
@@ -426,14 +466,23 @@ ${
   zodImportToOutput.length
     ? zodImportToOutput.map((node) => print(node)).join("\n") + "\n\n"
     : ""
-}${
-    originalImportsToOutput.length
-      ? originalImportsToOutput.map((node) => print(node)).join("\n") + "\n\n"
-      : ""
-  }${Array.from(statements.values())
+}
+${
+  originalImportsToOutput.length
+    ? originalImportsToOutput.map((node) => print(node)).join("\n") + "\n\n"
+    : ""
+}
+${
+  Array.from(statements.values())
     .map((statement) => print(statement.value))
-    .join("\n\n")}
-`;
+    .join("\n\n")
+}
+${makeMaybePrinted(maybeConfig)}
+${
+  Array.from(statements.values())
+    .map((statement) => print(statement.value))
+    .join("\n\n")
+}`;
 
   const testCases = generateIntegrationTests(
     Array.from(statements.values())
@@ -543,3 +592,21 @@ ${Array.from(statements.values())
  */
 const isExported = (i: { typeName: string; value: ts.VariableStatement }) =>
   i.value.modifiers?.find((mod) => mod.kind === ts.SyntaxKind.ExportKeyword);
+
+const makeMaybePrinted = (maybeConfig: MaybeConfig): string => {
+  if (!maybeConfig.typeNames.size) return "";
+
+  let chained = "";
+  if (maybeConfig.nullable) {
+    chained += ".nullable()";
+  }
+  if (maybeConfig.optional) {
+    chained += ".optional()";
+  }
+
+  return `
+export const maybe = <T extends z.ZodTypeAny>(schema: T) => {
+  return schema${chained};
+};
+`;
+};
