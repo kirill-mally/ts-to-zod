@@ -30,7 +30,7 @@
     "gen:all": "./bin/run --all",
     "gen:example": "./bin/run --config example",
     "gen:config": "./bin/run --config config",
-    "prepare": "husky install"
+    "prepare": "yarn build && husky install"
   },
   "files": [
     "LICENSE",
