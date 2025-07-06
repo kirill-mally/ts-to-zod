@@ -1,5 +1,6 @@
 import slash from "slash";
 import { join, normalize, parse, relative } from "path";
+import { Config, InputOutputMapping, TsToZodConfig } from "../config";
 
 /**
  * Resolve the path of an import.
@@ -13,6 +14,21 @@ export function getImportPath(from: string, to: string) {
   const { dir, name } = parse(relativePath);
 
   return `${dir}/${name}`;
+}
+
+export function getInputOutputMappings(
+  config: TsToZodConfig | undefined
+): InputOutputMapping[] {
+  if (!config) return [];
+  if (Array.isArray(config)) {
+    return config.map(({ input, output, getSchemaName }) => ({
+      input,
+      output,
+      getSchemaName,
+    }));
+  }
+  const { input, output, getSchemaName } = config as Config;
+  return [{ input, output, getSchemaName }];
 }
 
 export function areImportPathsEqualIgnoringExtension(

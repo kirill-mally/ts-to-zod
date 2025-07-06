@@ -1,3 +1,5 @@
+import ts from "typescript";
+
 export interface SimplifiedJSDocTag {
   /**
    * Name of the tag
@@ -47,11 +49,19 @@ export type CustomJSDocFormatTypes = Record<
   string | CustomJSDocFormatTypeAttributes
 >;
 
-export type MaybeConfig = {
-  typeNames: Set<string>;
+export interface MaybeConfig {
   optional: boolean;
   nullable: boolean;
-};
+  typeNames: Set<string>; // Names of generic interfaces to treat as Maybe<T>
+}
+
+export interface State {
+  // existing fields...
+  genericMap: Map<string, ts.TypeNode>;
+  maybeConfig: MaybeConfig;
+  rawFileAst: ts.SourceFile | undefined;
+  seenSymbols: Set<ts.Symbol>;
+}
 
 export const DefaultMaybeConfig: MaybeConfig = {
   typeNames: new Set([]),

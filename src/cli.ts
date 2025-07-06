@@ -1,30 +1,26 @@
-import { Command, Flags, Errors, Args, Interfaces } from "@oclif/core";
+import { Command, Flags, Args, Interfaces } from "@oclif/core";
 import chokidar from "chokidar";
 import { existsSync, outputFile, readFile } from "fs-extra";
 import inquirer from "inquirer";
 import ora from "ora";
-import { join, normalize, parse, relative } from "path";
+import path, { join, normalize, parse } from "path";
 import prettier from "prettier";
 import slash from "slash";
 import ts from "typescript";
-import { generate, GenerateProps } from "./core/generate";
+import { GenerateProps, generate } from "./core/generate";
+import { createConfig } from "./createConfig";
 import {
-  TsToZodConfig,
-  Config,
-  MaybeConfig,
-  InputOutputMapping,
-} from "./config";
+  areImportPathsEqualIgnoringExtension,
+  getImportPath,
+  getInputOutputMappings,
+} from "./utils/getImportPath";
+import * as worker from "./worker";
+import { MaybeConfig, State, TsToZodConfig, Config } from "./config";
 import {
   getSchemaNameSchema,
   nameFilterSchema,
   tsToZodConfigSchema,
 } from "./config.zod";
-import { createConfig } from "./createConfig";
-import {
-  areImportPathsEqualIgnoringExtension,
-  getImportPath,
-} from "./utils/getImportPath";
-import * as worker from "./worker";
 
 let config: TsToZodConfig | undefined;
 let haveMultiConfig = false;
@@ -33,20 +29,21 @@ const configKeys: string[] = [];
 function isEsm() {
   try {
     const packageJsonPath = join(process.cwd(), "package.json");
-    const rawPackageJson = require(slash(relative(__dirname, packageJsonPath)));
+    const rawPackageJson = require(
+      slash(path.relative(__dirname, packageJsonPath))
+    );
     return rawPackageJson.type === "module";
   } catch (e) {}
   return false;
 }
 
-// Try to load `ts-to-zod.config.c?js`
-// We are doing this here to be able to infer the `flags` & `usage` in the cli help
 const fileExtension = isEsm() ? "cjs" : "js";
 const tsToZodConfigFileName = `ts-to-zod.config.${fileExtension}`;
 const configPath = join(process.cwd(), tsToZodConfigFileName);
+
 try {
   if (existsSync(configPath)) {
-    const rawConfig = require(slash(relative(__dirname, configPath)));
+    const rawConfig = require(slash(path.relative(__dirname, configPath)));
     config = tsToZodConfigSchema.parse(rawConfig);
     if (Array.isArray(config)) {
       haveMultiConfig = true;
@@ -55,24 +52,17 @@ try {
   }
 } catch (e) {
   if (e instanceof Error) {
-    Errors.error(
-      `"${tsToZodConfigFileName}" invalid:
-    ${e.message}
-  
-    Please fix the invalid configuration
-    You can generate a new config with --init`,
-      { exit: false }
+    throw new Error(
+      `"${tsToZodConfigFileName}" invalid:\n${e.message}\nPlease fix the invalid configuration\nYou can generate a new config with --init`
     );
   }
   process.exit(2);
 }
 
-class TsToZod extends Command {
+export default class TsToZod extends Command {
   static description = "Generate Zod schemas from a Typescript file";
 
-  static examples: Command.Example[] = [
-    `$ ts-to-zod src/types.ts src/types.zod.ts`,
-  ];
+  static examples = [`$ ts-to-zod src/types.ts src/types.zod.ts`];
 
   static usage = haveMultiConfig
     ? [
@@ -89,24 +79,6 @@ class TsToZod extends Command {
     keepComments: Flags.boolean({
       char: "k",
       description: "Keep parameters comments",
-    }),
-    maxRun: Flags.integer({
-      hidden: true,
-      default: 10,
-      description: "max iteration number to resolve the declaration order",
-    }),
-    maybeOptional: Flags.boolean({
-      description:
-        "treat Maybe<T> as optional (can be undefined). Can be combined with maybeNullable",
-    }),
-    maybeNullable: Flags.boolean({
-      description:
-        "treat Maybe<T> as nullable (can be null). Can be combined with maybeOptional",
-    }),
-    maybeTypeName: Flags.string({
-      multiple: true,
-      description:
-        "determines the name of the types to treat as 'Maybe'. Can be multiple.",
     }),
     init: Flags.boolean({
       char: "i",
@@ -128,7 +100,6 @@ class TsToZod extends Command {
       default: false,
       description: "Watch input file(s) for changes and re-run related task",
     }),
-    // -- Multi config flags --
     config: Flags.string({
       char: "c",
       options: configKeys,
@@ -144,26 +115,22 @@ class TsToZod extends Command {
   };
 
   static args = {
-    input: Args.file({
-      description: "input file (typescript)",
-    }),
-    output: Args.file({
-      description: "output file (zod schemas)",
-    }),
+    input: Args.file({ description: "input file (typescript)" }),
+    output: Args.file({ description: "output file (zod schemas)" }),
   };
 
-  async run() {
+  async run(): Promise<void> {
     const { args, flags } = await this.parse(TsToZod);
+
     if (flags.init) {
-      (await createConfig(configPath, tsToZodConfigFileName))
-        ? this.log(`🧐 ${tsToZodConfigFileName} created!`)
-        : this.log(`Nothing changed!`);
+      const created = await createConfig(configPath, tsToZodConfigFileName);
+      this.log(
+        created ? `🧐 ${tsToZodConfigFileName} created!` : `Nothing changed!`
+      );
       return;
     }
 
     const fileConfig = await this.loadFileConfig(config, flags);
-
-    const ioMappings = getInputOutputMappings(config);
 
     if (Array.isArray(fileConfig)) {
       if (args.input || args.output) {
@@ -171,11 +138,11 @@ class TsToZod extends Command {
       }
       try {
         await Promise.all(
-          fileConfig.map(async (config) => {
-            this.log(`Generating "${config.name}"`);
-            const result = await this.generate(args, config, flags, ioMappings);
+          fileConfig.map(async (conf) => {
+            this.log(`Generating "${conf.name}"`);
+            const result = await this.generate(args, conf, flags);
             if (result.success) {
-              this.log(` 🎉 Zod schemas generated!`);
+              this.log(`🎉 Zod schemas generated!`);
             } else {
               this.error(result.error, { exit: false });
             }
@@ -183,12 +150,10 @@ class TsToZod extends Command {
           })
         );
       } catch (e) {
-        const error =
-          typeof e === "string" || e instanceof Error ? e : JSON.stringify(e);
-        this.error(error);
+        this.error(`${e}`, { exit: false });
       }
     } else {
-      const result = await this.generate(args, fileConfig, flags, ioMappings);
+      const result = await this.generate(args, fileConfig, flags);
       if (result.success) {
         this.log(`🎉 Zod schemas generated!`);
       } else {
@@ -205,11 +170,11 @@ class TsToZod extends Command {
       chokidar.watch(inputs).on("change", async (path) => {
         console.clear();
         this.log(`Changes detected in "${slash(path)}"`);
-        const config = Array.isArray(fileConfig)
+        const conf = Array.isArray(fileConfig)
           ? fileConfig.find((i) => i.input === slash(path))
           : fileConfig;
 
-        const result = await this.generate(args, config, flags, ioMappings);
+        const result = await this.generate(args, conf, flags);
         if (result.success) {
           this.log(`🎉 Zod schemas generated!`);
         } else {
@@ -220,18 +185,10 @@ class TsToZod extends Command {
     }
   }
 
-  /**
-   * Generate on zod schema file.
-   * @param args
-   * @param fileConfig
-   * @param Flags
-   * @param inputOutputMappings
-   */
   async generate(
     args: { input?: string; output?: string },
     fileConfig: Config | undefined,
-    Flags: Interfaces.InferredFlags<typeof TsToZod.flags>,
-    inputOutputMappings: InputOutputMapping[]
+    flags: Interfaces.InferredFlags<typeof TsToZod.flags>
   ): Promise<{ success: true } | { success: false; error: string }> {
     const input = args.input || fileConfig?.input;
     const output = args.output || fileConfig?.output;
@@ -248,28 +205,21 @@ See more help with --help`,
     const inputPath = join(process.cwd(), input);
     const outputPath = join(process.cwd(), output || input);
 
-    const relativeIOMappings = inputOutputMappings.map((io) => {
-      const relativeInput = getImportPath(inputPath, io.input);
-      const relativeOutput = getImportPath(outputPath, io.output);
+    const relativeIOMappings = getInputOutputMappings(fileConfig);
 
-      return {
-        input: relativeInput,
-        output: relativeOutput,
-        getSchemaName: io.getSchemaName,
-      };
-    });
-
-    // Check args/flags file extensions
+    // Validate file extensions
     const extErrors: { path: string; expectedExtensions: string[] }[] = [];
-    if (!hasExtensions(input, typescriptExtensions)) {
-      extErrors.push({
-        path: input,
-        expectedExtensions: typescriptExtensions,
-      });
+    const typescriptExtensions = [".ts", ".tsx"];
+    const javascriptExtensions = [".js", ".jsx"];
+
+    if (!typescriptExtensions.some((ext) => input.endsWith(ext))) {
+      extErrors.push({ path: input, expectedExtensions: typescriptExtensions });
     }
     if (
       output &&
-      !hasExtensions(output, [...typescriptExtensions, ...javascriptExtensions])
+      ![...typescriptExtensions, ...javascriptExtensions].some((ext) =>
+        output.endsWith(ext)
+      )
     ) {
       extErrors.push({
         path: output,
@@ -293,24 +243,45 @@ See more help with --help`,
 
     const sourceText = await readFile(inputPath, "utf-8");
 
-    const generateOptions: GenerateProps = this.extractGenerateOptions(
+    // Parse TS SourceFile AST (required for generics support)
+    const sourceFile = ts.createSourceFile(
+      inputPath,
       sourceText,
-      fileConfig,
-      Flags
+      ts.ScriptTarget.Latest,
+      true
     );
 
-    if (relativeIOMappings != null) {
-      generateOptions.inputOutputMappings = relativeIOMappings;
-    }
-    if (typeof Flags.keepComments === "boolean") {
-      generateOptions.keepComments = Flags.keepComments;
-    }
-    if (typeof Flags.skipParseJSDoc === "boolean") {
-      generateOptions.skipParseJSDoc = Flags.skipParseJSDoc;
-    }
-    if (typeof Flags.inferredTypes === "string") {
-      generateOptions.inferredTypes = Flags.inferredTypes;
-    }
+    // Build maybeConfig from maybeTypeNames if available
+    const maybeTypeNamesArray =
+      fileConfig?.maybeTypeNames != null &&
+      Array.isArray(fileConfig?.maybeTypeNames)
+        ? fileConfig?.maybeTypeNames
+        : [];
+    const maybeConfig: MaybeConfig = {
+      optional: true,
+      nullable: true,
+      typeNames: new Set(maybeTypeNamesArray),
+    };
+
+    // Build initial state for generation with genericMap & maybeConfig & sourceFile AST
+    const state: State = {
+      genericMap: new Map(),
+      maybeConfig,
+      rawFileAst: sourceFile,
+      seenSymbols: new Set(),
+      // Include any other properties your State interface requires here
+    };
+
+    // Compose generation options
+    const generateOptions: GenerateProps = {
+      sourceText,
+      inputOutputMappings: relativeIOMappings,
+      keepComments: flags.keepComments,
+      skipParseJSDoc: flags.skipParseJSDoc,
+      inferredTypes: flags.inferredTypes,
+      state,
+      ...fileConfig,
+    };
 
     const {
       errors,
@@ -329,26 +300,23 @@ See more help with --help`,
       };
     }
 
-    errors.map(this.warn.bind(this));
+    errors.forEach(this.warn.bind(this));
 
-    if (!Flags.skipValidation) {
+    if (!flags.skipValidation) {
       const validatorSpinner = ora("Validating generated types").start();
-      if (Flags.all) validatorSpinner.indent = 1;
+      if (flags.all) validatorSpinner.indent = 1;
 
       const extraFiles = [];
-      for (const io of inputOutputMappings) {
+
+      for (const io of relativeIOMappings) {
         if (getImportPath(inputPath, io.input) !== "/") {
           try {
             const fileInputPath = join(process.cwd(), io.input);
             const inputFile = await readFile(fileInputPath, "utf-8");
-            extraFiles.push({
-              sourceText: inputFile,
-              relativePath: io.input,
-            });
+            extraFiles.push({ sourceText: inputFile, relativePath: io.input });
           } catch {
             validatorSpinner.warn(`File "${io.input}" not found`);
           }
-
           try {
             const fileOutputPath = join(process.cwd(), io.output);
             const outputFile = await readFile(fileOutputPath, "utf-8");
@@ -365,12 +333,9 @@ See more help with --help`,
       }
 
       let outputForValidation = output || "";
-
-      // If we're generating over the same file, we need to set a fake output path for validation
       if (!output || areImportPathsEqualIgnoringExtension(input, output)) {
         const outputFileName = "source.zod.ts";
         const { dir } = parse(normalize(input));
-
         outputForValidation = join(dir, outputFileName);
       }
 
@@ -401,17 +366,11 @@ See more help with --help`,
         : validatorSpinner.succeed();
 
       if (generationErrors.length > 0) {
-        return {
-          success: false,
-          error: generationErrors.join("\n"),
-        };
+        return { success: false, error: generationErrors.join("\n") };
       }
     }
 
-    const zodSchemasFile = getZodSchemasFile(
-      getImportPath(outputPath, inputPath)
-    );
-
+    // Format and write output files
     const prettierConfig = await prettier.resolveConfig(process.cwd());
 
     if (generateOptions.inferredTypes) {
@@ -439,86 +398,38 @@ See more help with --help`,
       await outputFile(
         outputPath,
         await prettier.format(
-          ts.transpileModule(zodSchemasFile, {
-            compilerOptions: {
-              target: ts.ScriptTarget.Latest,
-              module: ts.ModuleKind.ESNext,
-              newLine: ts.NewLineKind.LineFeed,
-            },
-          }).outputText,
+          ts.transpileModule(
+            getZodSchemasFile(getImportPath(outputPath, inputPath)),
+            {
+              compilerOptions: {
+                target: ts.ScriptTarget.Latest,
+                module: ts.ModuleKind.ESNext,
+                newLine: ts.NewLineKind.LineFeed,
+              },
+            }
+          ).outputText,
           { parser: "babel-ts", ...prettierConfig }
         )
       );
     } else {
       await outputFile(
         outputPath,
-        await prettier.format(zodSchemasFile, {
-          parser: "babel-ts",
-          ...prettierConfig,
-        })
+        await prettier.format(
+          getZodSchemasFile(getImportPath(outputPath, inputPath)),
+          { parser: "babel-ts", ...prettierConfig }
+        )
       );
     }
+
     return { success: true };
   }
 
-  private extractGenerateOptions(
-    sourceText: string,
-    givenFileConfig: Config | undefined,
-    flags: Interfaces.InferredFlags<typeof TsToZod.flags>
-  ) {
-    const { maybeOptional, maybeNullable, maybeTypeNames, ...fileConfig } =
-      givenFileConfig || {};
-
-    const maybeConfig: MaybeConfig = {
-      optional: maybeOptional ?? true,
-      nullable: maybeNullable ?? true,
-      typeNames: new Set(maybeTypeNames ?? []),
-    };
-    if (typeof flags.maybeTypeName === "string" && flags.maybeTypeName) {
-      maybeConfig.typeNames = new Set([flags.maybeTypeName]);
-    }
-    if (
-      flags.maybeTypeName &&
-      Array.isArray(flags.maybeTypeName) &&
-      flags.maybeTypeName.length
-    ) {
-      maybeConfig.typeNames = new Set(flags.maybeTypeName);
-    }
-    if (typeof flags.maybeOptional === "boolean") {
-      maybeConfig.optional = flags.maybeOptional;
-    }
-    if (typeof flags.maybeNullable === "boolean") {
-      maybeConfig.nullable = flags.maybeNullable;
-    }
-
-    const generateOptions: GenerateProps = {
-      sourceText,
-      maybeConfig,
-      ...fileConfig,
-    };
-
-    if (typeof flags.maxRun === "number") {
-      generateOptions.maxRun = flags.maxRun;
-    }
-    if (typeof flags.keepComments === "boolean") {
-      generateOptions.keepComments = flags.keepComments;
-    }
-    if (typeof flags.skipParseJSDoc === "boolean") {
-      generateOptions.skipParseJSDoc = flags.skipParseJSDoc;
-    }
-    return generateOptions;
-  }
-
-  /**
-   * Load user config from `ts-to-zod.config.c?js`
-   */
   async loadFileConfig(
     config: TsToZodConfig | undefined,
     flags: Interfaces.InferredFlags<typeof TsToZod.flags>
   ): Promise<TsToZodConfig | undefined> {
-    if (!config) {
-      return undefined;
-    }
+    if (!config) return undefined;
+
     if (Array.isArray(config)) {
       if (!flags.all && !flags.config) {
         const { mode } = await inquirer.prompt<{
@@ -526,7 +437,7 @@ See more help with --help`,
         }>([
           {
             name: "mode",
-            message: `You have multiple configs available in "${tsToZodConfigFileName}"\n What do you want?`,
+            message: `You have multiple configs in "${tsToZodConfigFileName}"\n What do you want?`,
             type: "list",
             choices: [
               {
@@ -559,7 +470,6 @@ See more help with --help`,
       }
       return undefined;
     }
-
     return {
       ...config,
       getSchemaName: config.getSchemaName
@@ -572,37 +482,7 @@ See more help with --help`,
   }
 }
 
-const typescriptExtensions = [".ts", ".tsx"];
-const javascriptExtensions = [".js", ".jsx"];
-
-/**
- * Validate if the file extension is ts or tsx.
- *
- * @param path relative path
- * @param extensions list of allowed extensions
- * @returns true if the extension is valid
- */
-function hasExtensions(path: string, extensions: string[]) {
+function hasExtensions(path: string, extensions: string[]): boolean {
   const { ext } = parse(path);
   return extensions.includes(ext);
 }
-
-function getInputOutputMappings(
-  config: TsToZodConfig | undefined
-): InputOutputMapping[] {
-  if (!config) {
-    return [];
-  }
-
-  if (Array.isArray(config)) {
-    return config.map((c) => {
-      const { input, output, getSchemaName } = c;
-      return { input, output, getSchemaName };
-    });
-  }
-
-  const { input, output, getSchemaName } = config as Config;
-  return [{ input, output, getSchemaName }];
-}
-
-export = TsToZod;

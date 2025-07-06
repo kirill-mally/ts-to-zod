@@ -7,7 +7,8 @@ import {
   NameFilter,
   CustomJSDocFormatTypes,
   MaybeConfig,
-  DefaultMaybeConfig
+  DefaultMaybeConfig,
+  State,
 } from "../config";
 import { getSimplifiedJsDocTags } from "../utils/getSimplifiedJsDocTags";
 import { resolveModules } from "../utils/resolveModules";
@@ -112,6 +113,12 @@ export interface GenerateProps {
    * Indicates max iteration number to resolve the declaration order.
    */
   maxRun?: number;
+
+  /**
+   * Indicates the initial state for generation with genericMap
+   * and maybeConfig and sourceFile AST.
+   */
+  state?: State;
 }
 
 type ValidTSNode =
@@ -477,17 +484,13 @@ ${
     ? originalImportsToOutput.map((node) => print(node)).join("\n") + "\n\n"
     : ""
 }
-${
-  Array.from(statements.values())
-    .map((statement) => print(statement.value))
-    .join("\n\n")
-}
+${Array.from(statements.values())
+  .map((statement) => print(statement.value))
+  .join("\n\n")}
 ${makeMaybePrinted(maybeConfig)}
-${
-  Array.from(statements.values())
-    .map((statement) => print(statement.value))
-    .join("\n\n")
-}`;
+${Array.from(statements.values())
+  .map((statement) => print(statement.value))
+  .join("\n\n")}`;
 
   const testCases = generateIntegrationTests(
     Array.from(statements.values())

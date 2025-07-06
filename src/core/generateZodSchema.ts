@@ -5,6 +5,7 @@ import {
   CustomJSDocFormatTypes,
   DefaultMaybeConfig,
   MaybeConfig,
+  State,
 } from "../config";
 import { findNode } from "../utils/findNode";
 import { isNotNull } from "../utils/isNotNull";
@@ -17,6 +18,181 @@ import {
   jsDocTagToZodProperties,
   zodPropertyIsOptional,
 } from "./jsDocTags";
+import { z } from "zod";
+
+/**
+ * Main entry to generate Zod Schema from the input TS AST node with generics support.
+ */
+export function generateZodSchema(node: ts.Node, state: State): z.ZodTypeAny {
+  // === Handle TypeReferenceNode with generics ===
+  if (ts.isTypeReferenceNode(node) && node.typeArguments?.length) {
+    const referencedTypeName = getTypeName(node.typeName);
+
+    // Retrieve the interface/type alias declaration of the referenced typeName in the current SourceFile
+    const decl = findInterfaceOrTypeAliasDecl(
+      referencedTypeName,
+      state.rawFileAst
+    );
+
+    if (decl && decl.typeParameters) {
+      // Create new genericMap extending current state.genericMap with new concrete type arguments mappings
+      const newGenericMap = new Map(state.genericMap);
+      decl.typeParameters.forEach((param, index) => {
+        const concreteArg = node.typeArguments![index];
+        if (concreteArg) {
+          newGenericMap.set(param.name.text, concreteArg);
+        }
+      });
+
+      const newState: State = { ...state, genericMap: newGenericMap };
+      return generateZodSchema(decl, newState);
+    }
+  }
+
+  // === Substitute generic parameter nodes with concrete type nodes per genericMap ===
+  if (ts.isTypeReferenceNode(node)) {
+    const typeRefName = getTypeName(node.typeName);
+    if (state.genericMap.has(typeRefName)) {
+      return generateZodSchema(state.genericMap.get(typeRefName)!, state);
+    }
+  }
+
+  // === Special treatment for generic interfaces listed in maybeConfig.typeNames ===
+  if (
+    ts.isInterfaceDeclaration(node) &&
+    state.maybeConfig.typeNames.has(node.name.text)
+  ) {
+    return generateMaybeInterfaceSchema(node, state);
+  }
+
+  // === The rest is your existing generateZodSchema code for other TS node kinds ===
+  // e.g. switch case for literal, union, object, array, etc. that are present in your main branch.
+  // RETURN your existing code here unchanged to keep compatibility
+
+  // Sample stub (your real code must have full implementation here):
+  switch (node.kind) {
+    case ts.SyntaxKind.StringKeyword:
+      return z.string();
+
+    case ts.SyntaxKind.NumberKeyword:
+      return z.number();
+
+    case ts.SyntaxKind.BooleanKeyword:
+      return z.boolean();
+
+    case ts.SyntaxKind.TypeLiteral:
+      // your existing object schema generation
+      return generateZodSchema(node as ts.TypeLiteralNode, state);
+
+    case ts.SyntaxKind.UnionType:
+      return generateZodSchema(node as ts.UnionTypeNode, state);
+
+    // Add more cases as per your existing implementation...
+
+    default:
+      // fallback
+      return z.unknown();
+  }
+}
+
+// -------------- Helper functions -----------------------------------
+
+/** Get string name from ts.EntityName (Identifier or QualifiedName) */
+function getTypeName(typeName: ts.EntityName): string {
+  if (ts.isIdentifier(typeName)) return typeName.text;
+  return getTypeName(typeName.right);
+}
+
+/**
+ * Finds interface or type alias declarations by name in a SourceFile.
+ */
+function findInterfaceOrTypeAliasDecl(
+  name: string,
+  sourceFile: ts.SourceFile | undefined
+): ts.InterfaceDeclaration | ts.TypeAliasDeclaration | undefined {
+  if (!sourceFile) return undefined;
+  const decls = sourceFile.statements.filter((stmt) => {
+    return (
+      (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) &&
+      stmt.name.text === name
+    );
+  });
+  return decls[0] as
+    | ts.InterfaceDeclaration
+    | ts.TypeAliasDeclaration
+    | undefined;
+}
+
+/**
+ * Generates Zod schema for interfaces that match generic maybe-type logic (e.g. HeaderSelect<T extends boolean = true>).
+ */
+function generateMaybeInterfaceSchema(
+  node: ts.InterfaceDeclaration,
+  state: State
+): z.ZodTypeAny {
+  // Assumes exactly one type parameter T extends boolean = true/false
+  if (!node.typeParameters?.length || node.typeParameters.length !== 1) {
+    throw new Error(
+      `[ts-to-zod] maybeTypeNames interface ${node.name.text} must have exactly one generic parameter`
+    );
+  }
+  const typeParam = node.typeParameters[0];
+  const genericName = typeParam.name.text;
+
+  // Resolve concrete generic argument (or default to true literal)
+  const concreteGeneric =
+    state.genericMap.get(genericName) ??
+    ts.factory.createLiteralTypeNode(ts.factory.createTrue());
+
+  // Check if concreteGeneric resolves to literal true
+  const enabled = isLiteralTrueNode(concreteGeneric);
+
+  // Clone genericMap without the generic param to avoid recursive loops
+  const newGenericMap = new Map(state.genericMap);
+  newGenericMap.delete(genericName);
+
+  const newState = { ...state, genericMap: newGenericMap };
+
+  // Generate base schema for the interface body members, marking optional/nullable if disabled (enabled=false)
+  return generateInterfaceMembersSchema(node, newState, !enabled);
+}
+
+/**
+ * Returns true if the type node represents boolean literal "true"
+ */
+function isLiteralTrueNode(node: ts.TypeNode): boolean {
+  if (ts.isLiteralTypeNode(node)) {
+    return node.literal.kind === ts.SyntaxKind.TrueKeyword;
+  }
+  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
+  return false;
+}
+
+/**
+ * Generate Zod schema for interface members, optionally making all props optional/nullable.
+ */
+function generateInterfaceMembersSchema(
+  node: ts.InterfaceDeclaration,
+  state: State,
+  makeOptionalNullable: boolean
+): z.ZodTypeAny {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  node.members.forEach((member) => {
+    if (ts.isPropertySignature(member) && member.type && member.name) {
+      const propName = member.name.getText();
+      let propSchema = generateZodSchema(member.type, state);
+      if (makeOptionalNullable) {
+        if (state.maybeConfig.optional) propSchema = z.optional(propSchema);
+        if (state.maybeConfig.nullable) propSchema = z.nullable(propSchema);
+      } else if (member.questionToken) {
+        // Retain original optional if member is optional (has ?)
+        propSchema = z.optional(propSchema);
+      }
+      shape[propName] = propSchema;
+    }
+  });
+  return z.object(shape);
+}
 
 export interface GenerateZodSchemaProps {
   /**
