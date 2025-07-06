@@ -27,12 +27,32 @@ export function generateZodSchema(node: ts.Node, state: State): z.ZodTypeAny {
   // === Handle TypeReferenceNode with generics ===
   if (ts.isTypeReferenceNode(node) && node.typeArguments?.length) {
     const referencedTypeName = getTypeName(node.typeName);
+    console.debug(
+      `[GENERIC] Found TypeReference with generics: ${referencedTypeName}<${node.typeArguments
+        .map((ta) => ta.getText())
+        .join(", ")}>`
+    );
 
     // Retrieve the interface/type alias declaration of the referenced typeName in the current SourceFile
     const decl = findInterfaceOrTypeAliasDecl(
       referencedTypeName,
       state.rawFileAst
     );
+    if (!decl) {
+      console.debug(
+        `[GENERIC] No declaration found for: ${referencedTypeName}`
+      );
+    } else if (!decl.typeParameters) {
+      console.debug(
+        `[GENERIC] Declaration for ${referencedTypeName} has no generics`
+      );
+    } else {
+      console.debug(
+        `[GENERIC] Declaration for ${referencedTypeName} has generic params: ${decl.typeParameters
+          .map((tp) => tp.name.text)
+          .join(", ")}`
+      );
+    }
 
     if (decl && decl.typeParameters) {
       // Create new genericMap extending current state.genericMap with new concrete type arguments mappings
@@ -41,6 +61,11 @@ export function generateZodSchema(node: ts.Node, state: State): z.ZodTypeAny {
         const concreteArg = node.typeArguments![index];
         if (concreteArg) {
           newGenericMap.set(param.name.text, concreteArg);
+          console.debug(
+            `[GENERIC] Mapping generic param ${
+              param.name.text
+            } to concrete type: ${concreteArg.getText()}`
+          );
         }
       });
 
@@ -53,6 +78,9 @@ export function generateZodSchema(node: ts.Node, state: State): z.ZodTypeAny {
   if (ts.isTypeReferenceNode(node)) {
     const typeRefName = getTypeName(node.typeName);
     if (state.genericMap.has(typeRefName)) {
+      console.debug(
+        `[GENERIC] Substituting generic type param ${typeRefName} with concrete type`
+      );
       return generateZodSchema(state.genericMap.get(typeRefName)!, state);
     }
   }
@@ -62,6 +90,9 @@ export function generateZodSchema(node: ts.Node, state: State): z.ZodTypeAny {
     ts.isInterfaceDeclaration(node) &&
     state.maybeConfig.typeNames.has(node.name.text)
   ) {
+    console.debug(
+      `[MAYBE-T] Processing maybeTypeName interface: ${node.name.text}`
+    );
     return generateMaybeInterfaceSchema(node, state);
   }
 
@@ -110,13 +141,21 @@ function findInterfaceOrTypeAliasDecl(
   name: string,
   sourceFile: ts.SourceFile | undefined
 ): ts.InterfaceDeclaration | ts.TypeAliasDeclaration | undefined {
-  if (!sourceFile) return undefined;
+  if (!sourceFile) {
+    console.debug(`[LOOKUP] No sourceFile to lookup`);
+    return undefined;
+  }
   const decls = sourceFile.statements.filter((stmt) => {
     return (
       (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) &&
       stmt.name.text === name
     );
   });
+
+  console.debug(
+    `[LOOKUP] Lookup of ${name} found: ${decls?.length > 0 ? "yes" : "no"}`
+  );
+
   return decls[0] as
     | ts.InterfaceDeclaration
     | ts.TypeAliasDeclaration
@@ -144,8 +183,15 @@ function generateMaybeInterfaceSchema(
     state.genericMap.get(genericName) ??
     ts.factory.createLiteralTypeNode(ts.factory.createTrue());
 
+  console.debug(
+    `[MAYBE-T] "${
+      node.name.text
+    }" generic param ${genericName} concrete type: ${concreteGeneric.getText()}`
+  );
+
   // Check if concreteGeneric resolves to literal true
   const enabled = isLiteralTrueNode(concreteGeneric);
+  console.debug(`[MAYBE-T] Interpretation: enabled = ${enabled}`);
 
   // Clone genericMap without the generic param to avoid recursive loops
   const newGenericMap = new Map(state.genericMap);

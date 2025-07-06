@@ -290,7 +290,7 @@ See more help with --help`,
       getIntegrationTestFile,
       getInferredTypes,
       hasCircularDependencies,
-    } = generate(generateOptions);
+    } = await generate(generateOptions);
 
     if (hasCircularDependencies && !output) {
       return {
