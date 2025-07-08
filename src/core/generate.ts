@@ -7,7 +7,6 @@ import {
   NameFilter,
   CustomJSDocFormatTypes,
   MaybeConfig,
-  DefaultMaybeConfig
 } from "../config";
 import { getSimplifiedJsDocTags } from "../utils/getSimplifiedJsDocTags";
 import { resolveModules } from "../utils/resolveModules";
@@ -74,7 +73,6 @@ export interface GenerateProps {
    * Path of z.infer<> types file.
    */
   inferredTypes?: string;
-
   /**
    * Custom JSDoc format types.
    */
@@ -86,38 +84,8 @@ export interface GenerateProps {
    */
   inputOutputMappings?: InputOutputMapping[];
 
-  /*
-   * If present, it will be used to support the `Maybe<T>` special case.
-   *
-   * e.g.
-   * ```ts
-   * // with maybe config: { typeNames: ["Maybe"], optional: true, nullable: true }
-   *
-   * export type X = { a: string; b: Maybe<string> };
-   *
-   * // output:
-   * const maybe = <T extends z.ZodTypeAny>(schema: T) => {
-   *   return schema.optional().nullable();
-   * };
-   *
-   * export const xSchema = zod.object({
-   *   a: zod.string(),
-   *   b: maybe(zod.string())
-   * })
-   * ```
-   */
   maybeConfig?: MaybeConfig;
-
-  /*
-   * Indicates max iteration number to resolve the declaration order.
-   */
-  maxRun?: number;
 }
-
-type ValidTSNode =
-  | ts.InterfaceDeclaration
-  | ts.TypeAliasDeclaration
-  | ts.EnumDeclaration;
 
 /**
  * Generate zod schemas and integration tests from a typescript file.
@@ -126,8 +94,7 @@ type ValidTSNode =
  */
 export function generate({
   sourceText,
-  maybeConfig = DefaultMaybeConfig,
-  maxRun = 10,
+  maybeConfig,
   nameFilter = () => true,
   jsDocTagFilter = () => true,
   getSchemaName = DEFAULT_GET_SCHEMA,
@@ -139,11 +106,8 @@ export function generate({
   // Create a source file and deal with modules
   const sourceFile = resolveModules(sourceText);
 
-  const isMaybe = (node: ValidTSNode) =>
-    maybeConfig.typeNames.has(node.name.text);
-
-  // Extract the nodes (interface declarations, type aliases, and enums)
-  const nodes: Array<ValidTSNode> = [];
+  // Extract the nodes (interface declarations & type aliases)
+  const nodes: Array<TypeNode> = [];
 
   // declare a map to store the interface name and its corresponding zod schema
   const typeNameMapping = new Map<string, TypeNode | ts.ImportDeclaration>();
@@ -151,7 +115,6 @@ export function generate({
   /**
    * Following const are keeping track of all the things import-related
    */
-
   // All import nodes in the source file
   const zodImportNodes: ts.ImportDeclaration[] = [];
 
@@ -227,9 +190,6 @@ export function generate({
       typeNames.forEach((typeRef) => {
         candidateTypesToBeExtracted.add(typeRef);
       });
-
-      if (isMaybe(node)) return;
-      nodes.push(node);
     }
   };
   ts.forEachChild(sourceFile, visitor);
@@ -292,45 +252,54 @@ export function generate({
 
   // Generate zod schemas for type nodes
   const getDependencyName = (identifierName: string) => {
-    if (importedZodNamesAvailable.has(identifierName)) {
-      return importedZodNamesAvailable.get(identifierName) as string;
-    }
-    return getSchemaName(identifierName);
+    return (
+      importedZodNamesAvailable.get(identifierName) ||
+      getSchemaName(identifierName)
+    );
   };
 
   const zodTypeSchemas = nodes.map((node) => {
     const typeName = node.name.text;
     const varName = getSchemaName(typeName);
-    const zodSchema = generateZodSchemaVariableStatement({
+
+    const result = generateZodSchemaVariableStatement({
       zodImportValue: "z",
       node,
       sourceFile,
       varName,
-      getDependencyName: getDependencyName,
+      getDependencyName,
       skipParseJSDoc,
       customJSDocFormatTypes,
       maybeConfig,
     });
 
-    return { typeName, varName, ...zodSchema };
+    return {
+      typeName,
+      varName,
+      dependencies: result.dependencies,
+      statement: result.statement,
+      enumImport: result.enumImport,
+    };
   });
 
   // Generate zod schemas for 3rd party imports
   const zodImportSchemas = importNamesUsed.map((importName) => {
     const varName = getSchemaName(importName);
+    const statement = generateZodSchemaVariableStatementForImport({
+      varName,
+      zodImportValue: "z",
+    });
+
     return {
-      dependencies: [],
-      statement: generateZodSchemaVariableStatementForImport({
-        varName,
-        zodImportValue: "z",
-      }),
-      enumImport: false,
       typeName: importName,
       varName,
+      dependencies: [],
+      statement,
+      enumImport: false,
     };
   });
 
-  const zodSchemas = zodTypeSchemas.concat(zodImportSchemas);
+  const zodSchemas = [...zodTypeSchemas, ...zodImportSchemas];
   const zodSchemaNames = zodSchemas.map(({ varName }) => varName);
 
   // Resolves statements order
@@ -351,48 +320,56 @@ export function generate({
   // Loop until no more schemas can be generated and no more schemas with direct or indirect missing dependencies are found
   while (
     !done &&
-    statements.size + zodSchemasWithMissingDependencies.size !==
-      zodSchemas.length
+    statements.size + zodSchemasWithMissingDependencies.size < zodSchemas.length
   ) {
     done = true;
-    zodSchemas
-      .filter(
-        ({ varName }) =>
-          !statements.has(varName) &&
-          !zodSchemasWithMissingDependencies.has(varName)
-      )
-      .forEach(({ varName, dependencies, statement, typeName, enumImport }) => {
-        const isCircular = dependencies.includes(varName);
-        const notGeneratedDependencies = dependencies
-          .filter((dep) => dep !== varName)
-          .filter((dep) => !statements.has(dep))
-          .filter((dep) => !importedZodSchemas.has(dep));
-        if (notGeneratedDependencies.length === 0) {
-          done = false;
-          if (isCircular) {
-            sourceTypeImports.add(typeName);
-            statements.set(varName, {
-              value: transformRecursiveSchema("z", statement, typeName),
-              typeName,
-            });
-          } else {
-            if (enumImport) {
-              sourceEnumImports.add(typeName);
-            }
-            statements.set(varName, { value: statement, typeName });
+    for (const schema of zodSchemas) {
+      if (
+        statements.has(schema.varName) ||
+        zodSchemasWithMissingDependencies.has(schema.varName)
+      ) {
+        continue;
+      }
+
+      const { varName, dependencies, statement, typeName, enumImport } = schema;
+      const isCircular = dependencies.includes(varName as string);
+      const notGeneratedDependencies = dependencies
+        .filter((dep) => dep !== varName)
+        .filter((dep) => !statements.has(dep))
+        .filter((dep) => !importedZodSchemas.has(dep));
+      if (notGeneratedDependencies.length === 0) {
+        done = false;
+        if (isCircular) {
+          sourceTypeImports.add(typeName);
+          statements.set(varName, {
+            value: transformRecursiveSchema(
+              "z",
+              statement as ts.VariableStatement,
+              typeName
+            ),
+            typeName,
+          });
+        } else {
+          if (enumImport) {
+            sourceEnumImports.add(typeName);
           }
-        } else if (
-          // Check if every dependency is (in `zodSchemas` and not in `zodSchemasWithMissingDependencies`)
-          !notGeneratedDependencies.every(
-            (dep) =>
-              zodSchemaNames.includes(dep) &&
-              !zodSchemasWithMissingDependencies.has(dep)
-          )
-        ) {
-          done = false;
-          zodSchemasWithMissingDependencies.add(varName);
+          statements.set(varName, {
+            value: statement as ts.VariableStatement,
+            typeName,
+          });
         }
-      });
+      } else if (
+        // Check if every dependency is (in `zodSchemas` and not in `zodSchemasWithMissingDependencies`)
+        !notGeneratedDependencies.every(
+          (dep) =>
+            zodSchemaNames.includes(dep) &&
+            !zodSchemasWithMissingDependencies.has(dep)
+        )
+      ) {
+        done = false;
+        zodSchemasWithMissingDependencies.add(varName);
+      }
+    }
   }
 
   // Generate remaining schemas, which have circular dependencies with loop of length > 1 like: A->B—>C->A
@@ -471,23 +448,14 @@ ${
   zodImportToOutput.length
     ? zodImportToOutput.map((node) => print(node)).join("\n") + "\n\n"
     : ""
-}
-${
-  originalImportsToOutput.length
-    ? originalImportsToOutput.map((node) => print(node)).join("\n") + "\n\n"
-    : ""
-}
-${
-  Array.from(statements.values())
+}${
+    originalImportsToOutput.length
+      ? originalImportsToOutput.map((node) => print(node)).join("\n") + "\n\n"
+      : ""
+  }${Array.from(statements.values())
     .map((statement) => print(statement.value))
-    .join("\n\n")
-}
-${makeMaybePrinted(maybeConfig)}
-${
-  Array.from(statements.values())
-    .map((statement) => print(statement.value))
-    .join("\n\n")
-}`;
+    .join("\n\n")}
+`;
 
   const testCases = generateIntegrationTests(
     Array.from(statements.values())
@@ -597,21 +565,3 @@ ${Array.from(statements.values())
  */
 const isExported = (i: { typeName: string; value: ts.VariableStatement }) =>
   i.value.modifiers?.find((mod) => mod.kind === ts.SyntaxKind.ExportKeyword);
-
-const makeMaybePrinted = (maybeConfig: MaybeConfig): string => {
-  if (!maybeConfig.typeNames.size) return "";
-
-  let chained = "";
-  if (maybeConfig.nullable) {
-    chained += ".nullable()";
-  }
-  if (maybeConfig.optional) {
-    chained += ".optional()";
-  }
-
-  return `
-export const maybe = <T extends z.ZodTypeAny>(schema: T) => {
-  return schema${chained};
-};
-`;
-};

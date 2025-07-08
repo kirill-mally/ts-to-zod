@@ -7,18 +7,13 @@ import { join, normalize, parse, relative } from "path";
 import prettier from "prettier";
 import slash from "slash";
 import ts from "typescript";
-import { generate, GenerateProps } from "./core/generate";
-import {
-  TsToZodConfig,
-  Config,
-  MaybeConfig,
-  InputOutputMapping,
-} from "./config";
+import { Config, TsToZodConfig, InputOutputMapping } from "./config";
 import {
   getSchemaNameSchema,
   nameFilterSchema,
   tsToZodConfigSchema,
 } from "./config.zod";
+import { GenerateProps, generate } from "./core/generate";
 import { createConfig } from "./createConfig";
 import {
   areImportPathsEqualIgnoringExtension,
@@ -90,24 +85,6 @@ class TsToZod extends Command {
       char: "k",
       description: "Keep parameters comments",
     }),
-    maxRun: Flags.integer({
-      hidden: true,
-      default: 10,
-      description: "max iteration number to resolve the declaration order",
-    }),
-    maybeOptional: Flags.boolean({
-      description:
-        "treat Maybe<T> as optional (can be undefined). Can be combined with maybeNullable",
-    }),
-    maybeNullable: Flags.boolean({
-      description:
-        "treat Maybe<T> as nullable (can be null). Can be combined with maybeOptional",
-    }),
-    maybeTypeName: Flags.string({
-      multiple: true,
-      description:
-        "determines the name of the types to treat as 'Maybe'. Can be multiple.",
-    }),
     init: Flags.boolean({
       char: "i",
       description: `Create a ${tsToZodConfigFileName} file`,
@@ -140,6 +117,11 @@ class TsToZod extends Command {
       default: false,
       description: "Execute all configs",
       hidden: !haveMultiConfig,
+    }),
+    maybeTypeNames: Flags.string({
+      description:
+        "Comma-separated list of generic interface names to treat as Maybe types",
+      multiple: false,
     }),
   };
 
@@ -293,15 +275,17 @@ See more help with --help`,
 
     const sourceText = await readFile(inputPath, "utf-8");
 
-    const generateOptions: GenerateProps = this.extractGenerateOptions(
+    const generateOptions: GenerateProps = {
       sourceText,
-      fileConfig,
-      Flags
-    );
-
-    if (relativeIOMappings != null) {
-      generateOptions.inputOutputMappings = relativeIOMappings;
-    }
+      inputOutputMappings: relativeIOMappings,
+      ...fileConfig,
+      maybeConfig: {
+        maybeTypeNames: [
+          ...(fileConfig?.maybeConfig?.maybeTypeNames || []),
+          ...(Flags.maybeTypeNames ? Flags.maybeTypeNames.split(",") : []),
+        ],
+      },
+    };
     if (typeof Flags.keepComments === "boolean") {
       generateOptions.keepComments = Flags.keepComments;
     }
@@ -459,54 +443,6 @@ See more help with --help`,
       );
     }
     return { success: true };
-  }
-
-  private extractGenerateOptions(
-    sourceText: string,
-    givenFileConfig: Config | undefined,
-    flags: Interfaces.InferredFlags<typeof TsToZod.flags>
-  ) {
-    const { maybeOptional, maybeNullable, maybeTypeNames, ...fileConfig } =
-      givenFileConfig || {};
-
-    const maybeConfig: MaybeConfig = {
-      optional: maybeOptional ?? true,
-      nullable: maybeNullable ?? true,
-      typeNames: new Set(maybeTypeNames ?? []),
-    };
-    if (typeof flags.maybeTypeName === "string" && flags.maybeTypeName) {
-      maybeConfig.typeNames = new Set([flags.maybeTypeName]);
-    }
-    if (
-      flags.maybeTypeName &&
-      Array.isArray(flags.maybeTypeName) &&
-      flags.maybeTypeName.length
-    ) {
-      maybeConfig.typeNames = new Set(flags.maybeTypeName);
-    }
-    if (typeof flags.maybeOptional === "boolean") {
-      maybeConfig.optional = flags.maybeOptional;
-    }
-    if (typeof flags.maybeNullable === "boolean") {
-      maybeConfig.nullable = flags.maybeNullable;
-    }
-
-    const generateOptions: GenerateProps = {
-      sourceText,
-      maybeConfig,
-      ...fileConfig,
-    };
-
-    if (typeof flags.maxRun === "number") {
-      generateOptions.maxRun = flags.maxRun;
-    }
-    if (typeof flags.keepComments === "boolean") {
-      generateOptions.keepComments = flags.keepComments;
-    }
-    if (typeof flags.skipParseJSDoc === "boolean") {
-      generateOptions.skipParseJSDoc = flags.skipParseJSDoc;
-    }
-    return generateOptions;
   }
 
   /**
