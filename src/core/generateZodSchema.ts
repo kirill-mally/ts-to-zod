@@ -3,9 +3,8 @@ import uniq from "lodash/uniq";
 import ts, { factory as f } from "typescript";
 import {
   CustomJSDocFormatTypes,
-  DefaultMaybeConfig,
   MaybeConfig,
-  State,
+  ZodSchemaResult,
 } from "../config";
 import { findNode } from "../utils/findNode";
 import { isNotNull } from "../utils/isNotNull";
@@ -16,229 +15,12 @@ import {
   ZodProperty,
   getJSDocTags,
   jsDocTagToZodProperties,
-  zodPropertyIsOptional,
 } from "./jsDocTags";
-import { z } from "zod";
-
-/**
- * Main entry to generate Zod Schema from the input TS AST node with generics support.
- */
-export function generateZodSchema(node: ts.Node, state: State): z.ZodTypeAny {
-  // === Handle TypeReferenceNode with generics ===
-  if (ts.isTypeReferenceNode(node) && node.typeArguments?.length) {
-    const referencedTypeName = getTypeName(node.typeName);
-    console.debug(
-      `[GENERIC] Found TypeReference with generics: ${referencedTypeName}<${node.typeArguments
-        .map((ta) => ta.getText())
-        .join(", ")}>`
-    );
-
-    // Retrieve the interface/type alias declaration of the referenced typeName in the current SourceFile
-    const decl = findInterfaceOrTypeAliasDecl(
-      referencedTypeName,
-      state.rawFileAst
-    );
-    if (!decl) {
-      console.debug(
-        `[GENERIC] No declaration found for: ${referencedTypeName}`
-      );
-    } else if (!decl.typeParameters) {
-      console.debug(
-        `[GENERIC] Declaration for ${referencedTypeName} has no generics`
-      );
-    } else {
-      console.debug(
-        `[GENERIC] Declaration for ${referencedTypeName} has generic params: ${decl.typeParameters
-          .map((tp) => tp.name.text)
-          .join(", ")}`
-      );
-    }
-
-    if (decl && decl.typeParameters) {
-      // Create new genericMap extending current state.genericMap with new concrete type arguments mappings
-      const newGenericMap = new Map(state.genericMap);
-      decl.typeParameters.forEach((param, index) => {
-        const concreteArg = node.typeArguments![index];
-        if (concreteArg) {
-          newGenericMap.set(param.name.text, concreteArg);
-          console.debug(
-            `[GENERIC] Mapping generic param ${
-              param.name.text
-            } to concrete type: ${concreteArg.getText()}`
-          );
-        }
-      });
-
-      const newState: State = { ...state, genericMap: newGenericMap };
-      return generateZodSchema(decl, newState);
-    }
-  }
-
-  // === Substitute generic parameter nodes with concrete type nodes per genericMap ===
-  if (ts.isTypeReferenceNode(node)) {
-    const typeRefName = getTypeName(node.typeName);
-    if (state.genericMap.has(typeRefName)) {
-      console.debug(
-        `[GENERIC] Substituting generic type param ${typeRefName} with concrete type`
-      );
-      return generateZodSchema(state.genericMap.get(typeRefName)!, state);
-    }
-  }
-
-  // === Special treatment for generic interfaces listed in maybeConfig.typeNames ===
-  if (
-    ts.isInterfaceDeclaration(node) &&
-    state.maybeConfig.typeNames.has(node.name.text)
-  ) {
-    console.debug(
-      `[MAYBE-T] Processing maybeTypeName interface: ${node.name.text}`
-    );
-    return generateMaybeInterfaceSchema(node, state);
-  }
-
-  // === The rest is your existing generateZodSchema code for other TS node kinds ===
-  // e.g. switch case for literal, union, object, array, etc. that are present in your main branch.
-  // RETURN your existing code here unchanged to keep compatibility
-
-  // Sample stub (your real code must have full implementation here):
-  switch (node.kind) {
-    case ts.SyntaxKind.StringKeyword:
-      return z.string();
-
-    case ts.SyntaxKind.NumberKeyword:
-      return z.number();
-
-    case ts.SyntaxKind.BooleanKeyword:
-      return z.boolean();
-
-    case ts.SyntaxKind.TypeLiteral:
-      // your existing object schema generation
-      return generateZodSchema(node as ts.TypeLiteralNode, state);
-
-    case ts.SyntaxKind.UnionType:
-      return generateZodSchema(node as ts.UnionTypeNode, state);
-
-    // Add more cases as per your existing implementation...
-
-    default:
-      // fallback
-      return z.unknown();
-  }
-}
-
-// -------------- Helper functions -----------------------------------
-
-/** Get string name from ts.EntityName (Identifier or QualifiedName) */
-function getTypeName(typeName: ts.EntityName): string {
-  if (ts.isIdentifier(typeName)) return typeName.text;
-  return getTypeName(typeName.right);
-}
-
-/**
- * Finds interface or type alias declarations by name in a SourceFile.
- */
-function findInterfaceOrTypeAliasDecl(
-  name: string,
-  sourceFile: ts.SourceFile | undefined
-): ts.InterfaceDeclaration | ts.TypeAliasDeclaration | undefined {
-  if (!sourceFile) {
-    console.debug(`[LOOKUP] No sourceFile to lookup`);
-    return undefined;
-  }
-  const decls = sourceFile.statements.filter((stmt) => {
-    return (
-      (ts.isInterfaceDeclaration(stmt) || ts.isTypeAliasDeclaration(stmt)) &&
-      stmt.name.text === name
-    );
-  });
-
-  console.debug(
-    `[LOOKUP] Lookup of ${name} found: ${decls?.length > 0 ? "yes" : "no"}`
-  );
-
-  return decls[0] as
-    | ts.InterfaceDeclaration
-    | ts.TypeAliasDeclaration
-    | undefined;
-}
-
-/**
- * Generates Zod schema for interfaces that match generic maybe-type logic (e.g. HeaderSelect<T extends boolean = true>).
- */
-function generateMaybeInterfaceSchema(
-  node: ts.InterfaceDeclaration,
-  state: State
-): z.ZodTypeAny {
-  // Assumes exactly one type parameter T extends boolean = true/false
-  if (!node.typeParameters?.length || node.typeParameters.length !== 1) {
-    throw new Error(
-      `[ts-to-zod] maybeTypeNames interface ${node.name.text} must have exactly one generic parameter`
-    );
-  }
-  const typeParam = node.typeParameters[0];
-  const genericName = typeParam.name.text;
-
-  // Resolve concrete generic argument (or default to true literal)
-  const concreteGeneric =
-    state.genericMap.get(genericName) ??
-    ts.factory.createLiteralTypeNode(ts.factory.createTrue());
-
-  console.debug(
-    `[MAYBE-T] "${
-      node.name.text
-    }" generic param ${genericName} concrete type: ${concreteGeneric.getText()}`
-  );
-
-  // Check if concreteGeneric resolves to literal true
-  const enabled = isLiteralTrueNode(concreteGeneric);
-  console.debug(`[MAYBE-T] Interpretation: enabled = ${enabled}`);
-
-  // Clone genericMap without the generic param to avoid recursive loops
-  const newGenericMap = new Map(state.genericMap);
-  newGenericMap.delete(genericName);
-
-  const newState = { ...state, genericMap: newGenericMap };
-
-  // Generate base schema for the interface body members, marking optional/nullable if disabled (enabled=false)
-  return generateInterfaceMembersSchema(node, newState, !enabled);
-}
-
-/**
- * Returns true if the type node represents boolean literal "true"
- */
-function isLiteralTrueNode(node: ts.TypeNode): boolean {
-  if (ts.isLiteralTypeNode(node)) {
-    return node.literal.kind === ts.SyntaxKind.TrueKeyword;
-  }
-  if (node.kind === ts.SyntaxKind.TrueKeyword) return true;
-  return false;
-}
-
-/**
- * Generate Zod schema for interface members, optionally making all props optional/nullable.
- */
-function generateInterfaceMembersSchema(
-  node: ts.InterfaceDeclaration,
-  state: State,
-  makeOptionalNullable: boolean
-): z.ZodTypeAny {
-  const shape: Record<string, z.ZodTypeAny> = {};
-  node.members.forEach((member) => {
-    if (ts.isPropertySignature(member) && member.type && member.name) {
-      const propName = member.name.getText();
-      let propSchema = generateZodSchema(member.type, state);
-      if (makeOptionalNullable) {
-        if (state.maybeConfig.optional) propSchema = z.optional(propSchema);
-        if (state.maybeConfig.nullable) propSchema = z.nullable(propSchema);
-      } else if (member.questionToken) {
-        // Retain original optional if member is optional (has ?)
-        propSchema = z.optional(propSchema);
-      }
-      shape[propName] = propSchema;
-    }
-  });
-  return z.object(shape);
-}
+import {
+  createFallbackSchema,
+  createObjectSchemaStatement,
+  createOptionalProperty,
+} from "../utils/createSchemaHandler";
 
 export interface GenerateZodSchemaProps {
   /**
@@ -282,26 +64,6 @@ export interface GenerateZodSchemaProps {
    */
   customJSDocFormatTypes: CustomJSDocFormatTypes;
 
-  /**
-   * If present, it will be used to support the `Maybe<T>` special case.
-   *
-   * e.g.
-   * ```ts
-   * // with maybe config: { typeNames: ["Maybe"], optional: true, nullable: true }
-   *
-   * export type X = { a: string; b: Maybe<string> };
-   *
-   * // output:
-   * const maybe = <T extends z.ZodTypeAny>(schema: T) => {
-   *   return schema.optional().nullable();
-   * };
-   *
-   * export const xSchema = zod.object({
-   *   a: zod.string(),
-   *   b: maybe(zod.string())
-   * })
-   * ```
-   */
   maybeConfig?: MaybeConfig;
 }
 
@@ -324,7 +86,6 @@ interface BuildZodPrimitiveParams {
   dependencies: string[];
   getDependencyName: (identifierName: string) => string;
   skipParseJSDoc: boolean;
-  maybeConfig: MaybeConfig;
 }
 
 /**
@@ -338,25 +99,205 @@ export function generateZodSchemaVariableStatement({
   node,
   sourceFile,
   varName,
-  maybeConfig = DefaultMaybeConfig,
+  maybeConfig = { maybeTypeNames: [] },
   zodImportValue = "z",
   getDependencyName = (identifierName) => camel(`${identifierName}Schema`),
   skipParseJSDoc = false,
   customJSDocFormatTypes,
-}: GenerateZodSchemaProps) {
-  let schema:
-    | ts.CallExpression
-    | ts.Identifier
-    | ts.PropertyAccessExpression
-    | undefined;
+}: GenerateZodSchemaProps): ZodSchemaResult {
+  console.debug(`[GENERATE] Init generateZodSchemaVariableStatement.`);
+
+  if (!node || !("kind" in node)) {
+    throw new Error("Invalid node provided");
+  }
+
+  let schema: ts.Expression = f.createIdentifier("undefined");
   let dependencies: string[] = [];
   let enumImport = false;
 
+  const nodeKind = ts.SyntaxKind[node.kind];
+  const interfaceName = node.name?.text;
+  console.debug(`[DEBUG] Processing node: ${interfaceName}`);
+  console.debug(`[DEBUG] Processing node kind: ${nodeKind}`);
+
+  if (!interfaceName) {
+    return createFallbackSchema(varName);
+  }
+
   if (ts.isInterfaceDeclaration(node)) {
     let schemaExtensionClauses: SchemaExtensionClause[] | undefined;
-    if (node.typeParameters) {
+    // console.debug(
+    //   "[CONFIG] Received maybeTypeNames:",
+    //   maybeConfig.maybeTypeNames
+    // );
+
+    const isGenericMaybeInterface = (
+      node:
+        | ts.InterfaceDeclaration
+        | ts.TypeAliasDeclaration
+        | ts.EnumDeclaration
+    ): boolean => {
+      try {
+        if (!node?.name?.text) return false;
+        return (
+          maybeConfig.maybeTypeNames?.some(
+            (giName) => giName === node.name.text
+          ) ?? false
+        );
+      } catch (error) {
+        console.error("[GENERIC] Error checking generic interface:", error);
+        return false;
+      }
+    };
+
+    // Process generic interfaces first
+    if (isGenericMaybeInterface(node)) {
+      const properties =
+        node.members?.filter(ts.isPropertySignature)?.map((prop) => {
+          const propName = prop.name?.getText(sourceFile) || "unknown";
+          return createOptionalProperty(propName, zodImportValue);
+        }) || [];
+
+      return {
+        dependencies: [],
+        statement: createObjectSchemaStatement(
+          varName,
+          properties,
+          zodImportValue
+        ),
+        enumImport: false,
+      };
+    }
+
+    // Skip generic type parameter validation for our special interfaces
+    const isSpecialGenericInterface =
+      interfaceName && maybeConfig.maybeTypeNames?.includes(interfaceName);
+    console.debug(
+      `[DEBUG] Is a generic interface: ${
+        isSpecialGenericInterface ? "true" : "false"
+      }`
+    );
+
+    if (node.typeParameters && !isSpecialGenericInterface) {
       throw new Error("Interface with generics are not supported!");
     }
+
+    if (isSpecialGenericInterface) {
+      const properties = node.members
+        .filter(ts.isPropertySignature)
+        .map((prop) => {
+          const propName = prop.name.getText();
+          const anyCall = f.createCallExpression(
+            f.createPropertyAccessExpression(
+              f.createIdentifier(zodImportValue),
+              f.createIdentifier("any")
+            ),
+            undefined,
+            undefined
+          );
+
+          const optionalCall = f.createCallExpression(
+            f.createPropertyAccessExpression(
+              anyCall,
+              f.createIdentifier("optional")
+            ),
+            undefined,
+            undefined
+          );
+
+          return f.createPropertyAssignment(propName, optionalCall);
+        });
+
+      return {
+        dependencies: [],
+        statement: f.createVariableStatement(
+          undefined,
+          f.createVariableDeclarationList(
+            [
+              f.createVariableDeclaration(
+                varName,
+                undefined,
+                undefined,
+                f.createCallExpression(
+                  f.createPropertyAccessExpression(
+                    f.createIdentifier(zodImportValue),
+                    f.createIdentifier("object")
+                  ),
+                  undefined,
+                  [f.createObjectLiteralExpression(properties, true)]
+                )
+              ),
+            ],
+            ts.NodeFlags.Const
+          )
+        ),
+        enumImport: false,
+      };
+    }
+
+    // Check if this is a generic interface from config
+    console.debug(
+      `[DEBUG] Is part of Maybe interfaces list: ${
+        maybeConfig.maybeTypeNames?.includes(interfaceName) ? "true" : "false"
+      }`
+    );
+    if (interfaceName && maybeConfig.maybeTypeNames?.includes(interfaceName)) {
+      const properties = node.members
+        .filter(ts.isPropertySignature)
+        .map((prop) => {
+          const propName = prop.name.getText();
+          const anyCall = f.createCallExpression(
+            f.createPropertyAccessExpression(
+              f.createIdentifier(zodImportValue),
+              f.createIdentifier("any")
+            ),
+            undefined,
+            undefined
+          );
+
+          // Create the optional property by wrapping in a call to .optional()
+          const optionalCall = f.createCallExpression(
+            f.createPropertyAccessExpression(
+              anyCall,
+              f.createIdentifier("optional")
+            ),
+            undefined,
+            undefined
+          );
+
+          return f.createPropertyAssignment(propName, optionalCall);
+        });
+
+      return {
+        dependencies: [],
+        statement: f.createVariableStatement(
+          undefined,
+          f.createVariableDeclarationList(
+            [
+              f.createVariableDeclaration(
+                varName,
+                undefined,
+                undefined,
+                f.createCallExpression(
+                  f.createPropertyAccessExpression(
+                    f.createIdentifier(zodImportValue),
+                    f.createIdentifier("object")
+                  ),
+                  undefined,
+                  [f.createObjectLiteralExpression(properties, true)]
+                )
+              ),
+            ],
+            ts.NodeFlags.Const
+          )
+        ),
+        enumImport: false,
+      };
+    }
+
+    // if (node.typeParameters) {
+    //   throw new Error("Interface with generics are not supported!");
+    // }
     if (node.heritageClauses) {
       // Looping on heritageClauses browses the "extends" keywords
       schemaExtensionClauses = node.heritageClauses.reduce(
@@ -405,7 +346,6 @@ export function generateZodSchemaVariableStatement({
       schemaExtensionClauses,
       skipParseJSDoc,
       customJSDocFormatTypes,
-      maybeConfig,
     });
 
     if (!skipParseJSDoc) {
@@ -439,7 +379,6 @@ export function generateZodSchemaVariableStatement({
       dependencies,
       getDependencyName,
       skipParseJSDoc,
-      maybeConfig,
     });
   }
 
@@ -448,19 +387,26 @@ export function generateZodSchemaVariableStatement({
     enumImport = true;
   }
 
+  if (!schema) {
+    return {
+      dependencies: [],
+      statement: f.createVariableStatement(
+        undefined,
+        f.createVariableDeclarationList(
+          [f.createVariableDeclaration(varName)],
+          ts.NodeFlags.Const
+        )
+      ),
+      enumImport: false,
+    };
+  }
+
   return {
     dependencies: uniq(dependencies),
     statement: f.createVariableStatement(
       node.modifiers,
       f.createVariableDeclarationList(
-        [
-          f.createVariableDeclaration(
-            f.createIdentifier(varName),
-            undefined,
-            undefined,
-            schema
-          ),
-        ],
+        [f.createVariableDeclaration(varName, undefined, undefined, schema)],
         ts.NodeFlags.Const
       )
     ),
@@ -508,7 +454,6 @@ function buildZodProperties({
   getDependencyName,
   skipParseJSDoc,
   customJSDocFormatTypes,
-  maybeConfig,
 }: {
   members: ts.NodeArray<ts.TypeElement> | ts.PropertySignature[];
   zodImportValue: string;
@@ -517,7 +462,6 @@ function buildZodProperties({
   getDependencyName: (identifierName: string) => string;
   skipParseJSDoc: boolean;
   customJSDocFormatTypes: CustomJSDocFormatTypes;
-  maybeConfig: MaybeConfig;
 }) {
   const properties = new Map<
     ts.Identifier | ts.StringLiteral | ts.NumericLiteral,
@@ -551,7 +495,6 @@ function buildZodProperties({
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
       })
     );
   });
@@ -604,7 +547,6 @@ function buildZodPrimitiveInternal({
   dependencies,
   getDependencyName,
   skipParseJSDoc,
-  maybeConfig
 }: BuildZodPrimitiveParams):
   | ts.CallExpression
   | ts.Identifier
@@ -630,35 +572,11 @@ function buildZodPrimitiveInternal({
       dependencies,
       getDependencyName,
       skipParseJSDoc,
-      maybeConfig,
     });
   }
 
   if (ts.isTypeReferenceNode(typeNode) && ts.isIdentifier(typeNode.typeName)) {
     const identifierName = typeNode.typeName.text;
-
-    // Deal with `Maybe<>`
-    if (maybeConfig.typeNames.has(identifierName) && typeNode.typeArguments) {
-      const innerType = typeNode.typeArguments[0];
-      return maybeCall(
-        buildZodPrimitive({
-          z,
-          typeNode: innerType,
-          isOptional: false,
-          isNullable,
-          isPartial,
-          isRequired,
-          jsDocTags: {},
-          customJSDocFormatTypes,
-          sourceFile,
-          dependencies,
-          getDependencyName,
-          skipParseJSDoc,
-          maybeConfig,
-        }),
-        { isOptional }
-      );
-    }
 
     // Deal with `Array<>` syntax
     if (identifierName === "Array" && typeNode.typeArguments) {
@@ -667,15 +585,12 @@ function buildZodPrimitiveInternal({
         typeNode: f.createArrayTypeNode(typeNode.typeArguments[0]),
         isOptional,
         isNullable,
-        isPartial,
-        isRequired,
         jsDocTags,
-        customJSDocFormatTypes,
         sourceFile,
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
+        customJSDocFormatTypes,
       });
     }
 
@@ -693,7 +608,6 @@ function buildZodPrimitiveInternal({
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
       });
     }
 
@@ -711,7 +625,6 @@ function buildZodPrimitiveInternal({
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
       });
     }
 
@@ -728,7 +641,6 @@ function buildZodPrimitiveInternal({
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
       });
     }
 
@@ -742,14 +654,12 @@ function buildZodPrimitiveInternal({
             z,
             typeNode: typeNode.typeArguments[0],
             isOptional: false,
-            isNullable,
             jsDocTags: {},
-            customJSDocFormatTypes,
             sourceFile,
             dependencies,
             getDependencyName,
             skipParseJSDoc,
-            maybeConfig,
+            customJSDocFormatTypes,
           }),
         ],
         zodProperties
@@ -768,14 +678,13 @@ function buildZodPrimitiveInternal({
               z,
               typeNode: typeNode.typeArguments[1],
               isOptional: false,
-              isNullable,
               jsDocTags,
               customJSDocFormatTypes,
               sourceFile,
+              isPartial: false,
               dependencies,
               getDependencyName,
               skipParseJSDoc,
-              maybeConfig,
             }),
           ],
           zodProperties
@@ -791,20 +700,6 @@ function buildZodPrimitiveInternal({
             z,
             typeNode: typeNode.typeArguments[0],
             isOptional: false,
-            isNullable,
-            jsDocTags,
-            customJSDocFormatTypes,
-            sourceFile,
-            dependencies,
-            getDependencyName,
-            skipParseJSDoc,
-            maybeConfig,
-          }),
-          buildZodPrimitive({
-            z,
-            typeNode: typeNode.typeArguments[1],
-            isOptional: false,
-            isNullable,
             jsDocTags,
             customJSDocFormatTypes,
             sourceFile,
@@ -812,7 +707,18 @@ function buildZodPrimitiveInternal({
             dependencies,
             getDependencyName,
             skipParseJSDoc,
-            maybeConfig,
+          }),
+          buildZodPrimitive({
+            z,
+            typeNode: typeNode.typeArguments[1],
+            isOptional: false,
+            jsDocTags,
+            customJSDocFormatTypes,
+            sourceFile,
+            isPartial: false,
+            dependencies,
+            getDependencyName,
+            skipParseJSDoc,
           }),
         ],
         zodProperties
@@ -834,14 +740,12 @@ function buildZodPrimitiveInternal({
             z,
             typeNode: i,
             isOptional: false,
-            isNullable,
             jsDocTags,
             customJSDocFormatTypes,
             sourceFile,
             dependencies,
             getDependencyName,
             skipParseJSDoc,
-            maybeConfig,
           })
         ),
         zodProperties
@@ -858,14 +762,12 @@ function buildZodPrimitiveInternal({
             z,
             typeNode: i,
             isOptional: false,
-            isNullable,
             jsDocTags,
             customJSDocFormatTypes,
             sourceFile,
             dependencies,
             getDependencyName,
             skipParseJSDoc,
-            maybeConfig,
           })
         ),
         zodProperties
@@ -879,14 +781,12 @@ function buildZodPrimitiveInternal({
         z,
         typeNode: originalType,
         isOptional: false,
-        isNullable,
         jsDocTags: {},
-        customJSDocFormatTypes,
         sourceFile,
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
+        customJSDocFormatTypes,
       });
 
       return buildOmitPickObject(identifierName, keys, sourceFile, zodCall);
@@ -924,7 +824,6 @@ function buildZodPrimitiveInternal({
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
       });
     }
 
@@ -935,12 +834,11 @@ function buildZodPrimitiveInternal({
         isOptional: false,
         isNullable: false,
         jsDocTags: {},
-        customJSDocFormatTypes,
         sourceFile,
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
+        customJSDocFormatTypes,
       })
     );
 
@@ -1026,14 +924,12 @@ function buildZodPrimitiveInternal({
             z,
             typeNode: ts.isNamedTupleMember(node) ? node.type : node,
             isOptional: false,
-            isNullable,
             jsDocTags: {},
-            customJSDocFormatTypes,
             sourceFile,
             dependencies,
             getDependencyName,
             skipParseJSDoc,
-            maybeConfig,
+            customJSDocFormatTypes,
           })
         );
 
@@ -1043,15 +939,13 @@ function buildZodPrimitiveInternal({
           buildZodPrimitive({
             z,
             typeNode: restElement,
-            isNullable,
             isOptional: false,
             jsDocTags: {},
-            customJSDocFormatTypes,
             sourceFile,
             dependencies,
             getDependencyName,
             skipParseJSDoc,
-            maybeConfig,
+            customJSDocFormatTypes,
           }),
         ],
       });
@@ -1069,14 +963,12 @@ function buildZodPrimitiveInternal({
         z,
         typeNode: ts.isNamedTupleMember(node) ? node.type : node,
         isOptional: false,
-        isNullable,
         jsDocTags: {},
-        customJSDocFormatTypes,
         sourceFile,
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
+        customJSDocFormatTypes,
       })
     );
     return buildZodSchema(
@@ -1159,7 +1051,6 @@ function buildZodPrimitiveInternal({
           z,
           typeNode: typeNode.elementType,
           isOptional: false,
-          isNullable,
           jsDocTags: {
             description: jsDocTags.elementDescription,
             minimum: jsDocTags.elementMinimum,
@@ -1169,12 +1060,11 @@ function buildZodPrimitiveInternal({
             format: jsDocTags.elementFormat,
             pattern: jsDocTags.elementPattern,
           },
-          customJSDocFormatTypes,
           sourceFile,
           dependencies,
           getDependencyName,
           skipParseJSDoc,
-          maybeConfig,
+          customJSDocFormatTypes,
         }),
       ],
       zodProperties
@@ -1186,12 +1076,11 @@ function buildZodPrimitiveInternal({
       buildZodObject({
         typeNode,
         z,
-        customJSDocFormatTypes,
         sourceFile,
         dependencies,
         getDependencyName,
         skipParseJSDoc,
-        maybeConfig,
+        customJSDocFormatTypes,
       }),
       zodProperties
     );
@@ -1209,7 +1098,6 @@ function buildZodPrimitiveInternal({
       getDependencyName,
       skipParseJSDoc,
       customJSDocFormatTypes,
-      maybeConfig,
     });
 
     const zodCall = rest.reduce(
@@ -1231,7 +1119,6 @@ function buildZodPrimitiveInternal({
               getDependencyName,
               skipParseJSDoc,
               customJSDocFormatTypes,
-              maybeConfig,
             }),
           ]
         ),
@@ -1270,7 +1157,6 @@ function buildZodPrimitiveInternal({
               getDependencyName,
               isOptional: Boolean(p.questionToken),
               skipParseJSDoc,
-              maybeConfig,
             })
           ),
         },
@@ -1287,7 +1173,6 @@ function buildZodPrimitiveInternal({
               getDependencyName,
               isOptional: false,
               skipParseJSDoc,
-              maybeConfig,
             }),
           ],
         },
@@ -1303,7 +1188,6 @@ function buildZodPrimitiveInternal({
         getDependencyName,
         sourceFile,
         dependencies,
-        maybeConfig
       }),
       zodProperties
     );
@@ -1481,22 +1365,6 @@ function buildZodSchema(
   return withZodProperties(zodCall, properties);
 }
 
-function maybeCall(
-  arg: ts.Expression,
-  opts: { isOptional: boolean }
-): ts.CallExpression {
-  const zodCall = f.createCallExpression(
-    f.createIdentifier("maybe"),
-    undefined,
-    [arg]
-  );
-  const properties = [] as ZodProperty[];
-  if (opts.isOptional) {
-    properties.push(zodPropertyIsOptional());
-  }
-  return withZodProperties(zodCall, properties);
-}
-
 function buildZodExtendedSchema(
   schemaList: SchemaExtensionClause[],
   sourceFile: ts.SourceFile,
@@ -1599,7 +1467,6 @@ function buildZodObject({
   schemaExtensionClauses,
   skipParseJSDoc,
   customJSDocFormatTypes,
-  maybeConfig,
 }: {
   typeNode: ts.TypeLiteralNode | ts.InterfaceDeclaration;
   z: string;
@@ -1609,7 +1476,6 @@ function buildZodObject({
   schemaExtensionClauses?: SchemaExtensionClause[];
   skipParseJSDoc: boolean;
   customJSDocFormatTypes: CustomJSDocFormatTypes;
-  maybeConfig: MaybeConfig;
 }) {
   const { properties, indexSignature } = typeNode.members.reduce<{
     properties: ts.PropertySignature[];
@@ -1645,7 +1511,6 @@ function buildZodObject({
           getDependencyName,
           skipParseJSDoc,
           customJSDocFormatTypes,
-          maybeConfig
         })
       : new Map();
 
@@ -1693,7 +1558,6 @@ function buildZodObject({
         getDependencyName,
         skipParseJSDoc,
         customJSDocFormatTypes,
-        maybeConfig,
       }),
     ]);
 
@@ -1725,13 +1589,11 @@ function buildSchemaReference(
     dependencies,
     sourceFile,
     getDependencyName,
-    maybeConfig,
   }: {
     node: ts.IndexedAccessTypeNode;
     dependencies: string[];
     sourceFile: ts.SourceFile;
     getDependencyName: Required<GenerateZodSchemaProps>["getDependencyName"];
-    maybeConfig: MaybeConfig;
   },
   path = ""
 ): ts.PropertyAccessExpression | ts.Identifier | ts.ElementAccessExpression {
@@ -1769,22 +1631,6 @@ function buildSchemaReference(
       const member = members.find((m) => m.name?.getText(sourceFile) === key);
 
       if (member && ts.isPropertySignature(member) && member.type) {
-        // Maybe<type>
-        if (
-          ts.isTypeReferenceNode(member.type) &&
-          maybeConfig.typeNames.has(member.type.typeName.getText(sourceFile))
-        ) {
-          return buildSchemaReference(
-            {
-              node: node.objectType,
-              dependencies,
-              sourceFile,
-              getDependencyName,
-              maybeConfig,
-            },
-            `element.${path}`
-          );
-        }
         // Array<type>
         if (
           ts.isTypeReferenceNode(member.type) &&
@@ -1796,7 +1642,6 @@ function buildSchemaReference(
               dependencies,
               sourceFile,
               getDependencyName,
-              maybeConfig,
             },
             `element.${path}`
           );
@@ -1809,7 +1654,6 @@ function buildSchemaReference(
               dependencies,
               sourceFile,
               getDependencyName,
-              maybeConfig,
             },
             `element.${path}`
           );
@@ -1825,7 +1669,6 @@ function buildSchemaReference(
               dependencies,
               sourceFile,
               getDependencyName,
-              maybeConfig,
             },
             `valueSchema.${path}`
           );
@@ -1844,26 +1687,14 @@ function buildSchemaReference(
     ts.isIndexedAccessTypeNode(node.objectType)
   ) {
     return buildSchemaReference(
-      {
-        node: node.objectType,
-        dependencies,
-        sourceFile,
-        getDependencyName,
-        maybeConfig,
-      },
+      { node: node.objectType, dependencies, sourceFile, getDependencyName },
       `items[${indexTypeName}].${path}`
     );
   }
 
   if (ts.isIndexedAccessTypeNode(node.objectType)) {
     return buildSchemaReference(
-      {
-        node: node.objectType,
-        dependencies,
-        sourceFile,
-        getDependencyName,
-        maybeConfig,
-      },
+      { node: node.objectType, dependencies, sourceFile, getDependencyName },
       `shape.${indexTypeName}.${path}`
     );
   }

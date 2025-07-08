@@ -49,26 +49,6 @@ export type CustomJSDocFormatTypes = Record<
   string | CustomJSDocFormatTypeAttributes
 >;
 
-export interface MaybeConfig {
-  optional: boolean;
-  nullable: boolean;
-  typeNames: Set<string>; // Names of generic interfaces to treat as Maybe<T>
-}
-
-export interface State {
-  // existing fields...
-  genericMap: Map<string, ts.TypeNode>;
-  maybeConfig: MaybeConfig;
-  rawFileAst: ts.SourceFile | undefined;
-  seenSymbols: Set<ts.Symbol>;
-}
-
-export const DefaultMaybeConfig: MaybeConfig = {
-  typeNames: new Set([]),
-  optional: true,
-  nullable: true,
-};
-
 export type Config = {
   /**
    * Path of the input file (types source)
@@ -123,47 +103,7 @@ export type Config = {
    */
   customJSDocFormatTypes?: CustomJSDocFormatTypes;
 
-  /*
-   * If present, it will enable the Maybe special case for each of the given type names.
-   * They can be names of interfaces or types.
-   *
-   * e.g.
-   * - maybeTypeNames: ["Maybe"]
-   * - maybeOptional: true
-   * - maybeNullable: true
-   *
-   * ```ts
-   * // input:
-   * export type X = { a: string; b: Maybe<string> };
-   *
-   * // output:
-   * const maybe = <T extends z.ZodTypeAny>(schema: T) => {
-   *   return schema.optional().nullable();
-   * };
-   *
-   * export const xSchema = zod.object({
-   *   a: zod.string(),
-   *   b: maybe(zod.string())
-   * })
-   * ```
-   */
-  maybeTypeNames?: string[];
-
-  /**
-   * determines if the Maybe special case is optional (can be treated as undefined) or not
-   *
-   * @see maybeTypeNames
-   * @default true
-   */
-  maybeOptional?: boolean;
-
-  /**
-   * determines if the Maybe special case is nullable (can be treated as null) or not
-   *
-   * @see maybeTypeNames
-   * @default true
-   */
-  maybeNullable?: boolean;
+  maybeConfig?: MaybeConfig;
 };
 
 export type Configs = Array<
@@ -183,3 +123,17 @@ export type InputOutputMapping = Pick<
 >;
 
 export type TsToZodConfig = Config | Configs;
+
+export interface MaybeConfig {
+  maybeTypeNames?: string[];
+}
+
+export const DefaultMaybeConfig: MaybeConfig = {
+  maybeTypeNames: [],
+};
+
+export interface ZodSchemaResult {
+  dependencies: string[];
+  statement: ts.VariableStatement;
+  enumImport: boolean;
+}
